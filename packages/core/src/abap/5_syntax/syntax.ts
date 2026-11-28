@@ -44,6 +44,7 @@ import {Call} from "./statements/call";
 import {ClassImplementation} from "./statements/class_implementation";
 import {MethodImplementation} from "./statements/method_implementation";
 import {Move} from "./statements/move";
+import {Compute} from "./statements/compute";
 import {MoveCorresponding} from "./statements/move_corresponding";
 import {Catch} from "./statements/catch";
 import {Loop} from "./statements/loop";
@@ -76,6 +77,8 @@ import {CallFunction} from "./statements/call_function";
 import {Clear} from "./statements/clear";
 import {Refresh} from "./statements/refresh";
 import {Return} from "./statements/return";
+import {Retry} from "./statements/retry";
+import {Hide} from "./statements/hide";
 import {Free} from "./statements/free";
 import {Replace} from "./statements/replace";
 import {GetBit} from "./statements/get_bit";
@@ -191,6 +194,7 @@ if (Object.keys(map).length === 0) {
   addToMap(new ClassImplementation());
   addToMap(new MethodImplementation());
   addToMap(new Move());
+  addToMap(new Compute());
   addToMap(new GetBadi());
   addToMap(new CallBadi());
   addToMap(new GetCursor());
@@ -314,6 +318,8 @@ if (Object.keys(map).length === 0) {
   addToMap(new FieldGroup());
   addToMap(new EditorCall());
   addToMap(new DeleteMemory());
+  addToMap(new Retry());
+  addToMap(new Hide());
 }
 
 // -----------------------------------
@@ -331,6 +337,7 @@ export class SyntaxLogic {
   private scope: CurrentScope;
   private loopTables: LoopTableChange;
   private loopDepth: number;
+  private inCatch: boolean;
   private currentMethod: StructureNode | undefined;
   private sortedLines: SortedKeyWrite;
 
@@ -363,6 +370,7 @@ export class SyntaxLogic {
     this.deferred = [];
     this.loopTables = new LoopTableChange();
     this.loopDepth = 0;
+    this.inCatch = false;
     this.sortedLines = new SortedKeyWrite();
     this.reg.getDDICReferences().clear(this.object);
     this.reg.getMSAGReferences().clear(this.object);
@@ -453,6 +461,12 @@ export class SyntaxLogic {
     if (node instanceof StructureNode) {
       this.sortedLines.enter(node, this.currentFile.getFilename());
     }
+    const wasInCatch = this.inCatch;
+    if (node.get() instanceof Structures.Catch) {
+      this.inCatch = true;
+    } else if (node.get() instanceof Structures.Try || node.get() instanceof Structures.Cleanup) {
+      this.inCatch = false;
+    }
 
     for (const child of node.getChildren()) {
       const isStructure = child instanceof StructureNode;
@@ -497,6 +511,7 @@ export class SyntaxLogic {
       }
     }
 
+    this.inCatch = wasInCatch;
     if (loop === true) {
       this.loopTables.pop();
     }
@@ -587,6 +602,7 @@ export class SyntaxLogic {
       issues: this.issues,
       deferred: this.deferred,
       inLoop: this.loopDepth > 0,
+      inCatch: this.inCatch,
     };
 
     // todo, refactor
