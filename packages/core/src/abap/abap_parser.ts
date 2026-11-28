@@ -23,6 +23,8 @@ export interface IABAPParserOptions {
   languageVersion?: LanguageVersion;
   globalMacros?: readonly string[];
   reg?: IRegistry;
+  /** statements between METHOD and ENDMETHOD are not parsed, for objects only their signatures are needed of */
+  skipMethodBodies?: boolean;
 }
 
 export class ABAPParser {
@@ -30,6 +32,7 @@ export class ABAPParser {
   private readonly languageVersion: LanguageVersion;
   private readonly globalMacros: readonly string[];
   private readonly reg?: IRegistry;
+  private readonly skipMethodBodies: boolean;
 
   /** @deprecated Use `new ABAPParser(options)` instead */
   public constructor(release: ABAPRelease, globalMacros?: readonly string[], reg?: IRegistry);
@@ -44,11 +47,13 @@ export class ABAPParser {
       this.languageVersion = LanguageVersion.Normal;
       this.globalMacros = globalMacros ?? [];
       this.reg = reg;
+      this.skipMethodBodies = false;
     } else {
       this.release = optionsOrRelease.release ?? defaultRelease;
       this.languageVersion = optionsOrRelease.languageVersion ?? LanguageVersion.Normal;
       this.globalMacros = optionsOrRelease.globalMacros ?? [];
       this.reg = optionsOrRelease.reg;
+      this.skipMethodBodies = optionsOrRelease.skipMethodBodies ?? false;
     }
   }
 
@@ -70,7 +75,7 @@ export class ABAPParser {
 
 // 2: statements
     const b2 = Date.now();
-    const statementResult = new StatementParser(this.release, this.reg, this.languageVersion)
+    const statementResult = new StatementParser(this.release, this.reg, this.languageVersion, this.skipMethodBodies)
       .run(lexerResult, this.globalMacros);
     const statementsRuntime = Date.now() - b2;
 

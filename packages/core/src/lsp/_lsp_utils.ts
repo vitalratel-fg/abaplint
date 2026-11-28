@@ -28,6 +28,7 @@ export class LSPUtils {
     obj?.parse();
 
     if (obj instanceof ABAPObject) {
+      obj.parseMethodBodies();
       for (const abapfile of obj.getABAPFiles()) {
         if (abapfile.getFilename().toUpperCase() === filename.toUpperCase()) {
           return abapfile;

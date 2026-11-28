@@ -15,6 +15,7 @@ import {Pragma} from "../1_lexer/tokens";
 import {IRegistry} from "../../_iregistry";
 import {IStatementRunnable} from "./statement_runnable";
 import {reclassifySelect} from "./_select_reclassify";
+import {HeldStatement, MethodBodies} from "./_method_bodies";
 
 export const STATEMENT_MAX_TOKENS = 20000;
 
@@ -58,23 +59,67 @@ class StatementMap {
 
 class WorkArea {
   public readonly file: IFile;
-  public readonly tokens: readonly AbstractToken[];
+  public tokens: readonly AbstractToken[];
   public statements: StatementNode[];
+  private readonly bodies: MethodBodies | undefined;
 
-  public constructor(file: IFile, tokens: readonly AbstractToken[]) {
+  public constructor(file: IFile, tokens: readonly AbstractToken[], skipMethodBodies: boolean) {
     this.file = file;
     this.tokens = tokens;
     this.statements = [];
+    this.bodies = skipMethodBodies ? new MethodBodies() : undefined;
   }
 
-  public addUnknown(pre: AbstractToken[], post: AbstractToken[], colon: AbstractToken | undefined) {
-    const st = new StatementNode(new Unknown(), colon);
-    st.setChildren(this.tokensToNodes(pre, post));
-    this.statements.push(st);
+  /** index is the position of the token in the file tokens */
+  public addComment(token: AbstractToken, index: number) {
+    if (this.bodies?.holdComment(token, index) !== true) {
+      this.pushComment(token);
+    }
+  }
+
+  /** next is the index of the token after the statement */
+  public addUnknown(pre: AbstractToken[], post: AbstractToken[], colon: AbstractToken | undefined, next: number) {
+    if (this.bodies === undefined) {
+      this.pushUnknown(pre, post, colon);
+      return;
+    }
+    for (const statement of this.bodies.statement({pre, post, colon}, next)) {
+      this.push(statement);
+    }
+  }
+
+  /** after the last statement of the file */
+  public finish() {
+    if (this.bodies === undefined) {
+      return;
+    }
+    // ENDMETHOD missing at the end of the file
+    for (const statement of this.bodies.release()) {
+      this.push(statement);
+    }
+    this.tokens = this.bodies.keptTokens(this.tokens);
   }
 
   public toResult(): IStatementResult {
     return {file: this.file, tokens: this.tokens, statements: this.statements};
+  }
+
+  private push(statement: HeldStatement) {
+    if ("comment" in statement) {
+      this.pushComment(statement.comment);
+    } else {
+      this.pushUnknown(statement.pre, statement.post, statement.colon);
+    }
+  }
+
+  private pushComment(token: AbstractToken) {
+    this.statements.push(new StatementNode(new Comment()).setChildren([new TokenNode(token)]));
+  }
+
+  private pushUnknown(pre: AbstractToken[], post: AbstractToken[], colon: AbstractToken | undefined) {
+    const st = new StatementNode(new Unknown(), colon);
+    st.setChildren(this.tokensToNodes(pre, post));
+    this.statements.push(st);
   }
 
   private tokensToNodes(tokens1: AbstractToken[], tokens2: AbstractToken[]): TokenNode[] {
@@ -96,22 +141,24 @@ export class StatementParser {
   private readonly release: ABAPRelease;
   private readonly languageVersion: LanguageVersion;
   private readonly reg?: IRegistry;
+  private readonly skipMethodBodies: boolean;
 
   public constructor(release: ABAPRelease, reg?: IRegistry,
-                     languageVersion: LanguageVersion = LanguageVersion.Normal) {
+                     languageVersion: LanguageVersion = LanguageVersion.Normal, skipMethodBodies = false) {
     if (!StatementParser.map) {
       StatementParser.map = new StatementMap();
     }
     this.release = release;
     this.languageVersion = languageVersion;
     this.reg = reg;
+    this.skipMethodBodies = skipMethodBodies;
   }
 
   /** input is one full object */
   public run(input: readonly IABAPLexerResult[], globalMacros: readonly string[]): IStatementResult[] {
     const macros = new ExpandMacros(globalMacros, this.release, this.reg, this.languageVersion);
 
-    const wa = input.map(i => new WorkArea(i.file, i.tokens));
+    const wa = input.map(i => new WorkArea(i.file, i.tokens, this.skipMethodBodies));
 
     for (const w of wa) {
       this.process(w);
@@ -328,9 +375,11 @@ export class StatementParser {
     // afterwards and can only re-wrap what this has already cut
     let native = false;
 
-    for (const token of wa.tokens) {
+    const tokens = wa.tokens;
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
       if (token instanceof Tokens.Comment) {
-        wa.statements.push(new StatementNode(new Comment()).setChildren(this.tokensToNodes([token])));
+        wa.addComment(token, i);
         continue;
       }
 
@@ -340,12 +389,12 @@ export class StatementParser {
       if (str.length === 1) {
         if (str === ".") {
           native = this.nativeAfter(native, add, colon);
-          wa.addUnknown(pre, add, colon);
+          wa.addUnknown(pre, add, colon, i + 1);
           add = [];
           pre = [];
           colon = undefined;
         } else if (str === "," && pre.length > 0) {
-          wa.addUnknown(pre, add, colon);
+          wa.addUnknown(pre, add, colon, i + 1);
           add = [];
         } else if (str === ":" && colon === undefined && native === false) {
           colon = token;
@@ -359,8 +408,9 @@ export class StatementParser {
     }
 
     if (add.length > 0) {
-      wa.addUnknown(pre, add, colon);
+      wa.addUnknown(pre, add, colon, tokens.length);
     }
+    wa.finish();
   }
 
   /** whether the statement that just ended opens or closes a region where a

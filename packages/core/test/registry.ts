@@ -2,12 +2,18 @@ import {Registry} from "../src/registry";
 import {expect} from "chai";
 import {getABAPObjects} from "./get_abap";
 import {ABAPObject} from "../src/objects/_abap_object";
-import {Version} from "../src/version";
+import {Version, defaultRelease} from "../src/version";
 import {Config} from "../src/config";
 import {MemoryFile} from "../src/files/memory_file";
 import {Class, DataElement} from "../src/objects";
 import {AttributeLevel, Duration, RiskLevel} from "../src/abap/4_file_information/_abap_file_information";
 import {Visibility} from "../src/abap/4_file_information/visibility";
+import {SyntaxLogic} from "../src/abap/5_syntax/syntax";
+import {CheckInclude} from "../src/rules";
+import {Write} from "../src/abap/2_statements/statements";
+import {MacroCall} from "../src/abap/2_statements/statements/_statement";
+import {LanguageServer} from "../src/lsp/language_server";
+import {LSPUtils} from "../src/lsp/_lsp_utils";
 
 describe("Registry", () => {
 
@@ -752,4 +758,80 @@ ENDINTERFACE.`)).parse();
       ]);
   });
 
+});
+
+describe("Registry, method bodies of dependency classes", () => {
+  const clas = (name: string, body: string) => `CLASS ${name} DEFINITION PUBLIC.
+  PUBLIC SECTION.
+    CLASS-METHODS run IMPORTING iv TYPE i RETURNING VALUE(rv) TYPE string.
+ENDCLASS.
+CLASS ${name} IMPLEMENTATION.
+  METHOD run.
+${body}
+  ENDMETHOD.
+ENDCLASS.`;
+  const writes = (o: ABAPObject) => o.getABAPFiles().flatMap(f => f.getStatements()).filter(s => s.get() instanceof Write).length;
+
+  it("are not parsed, project code uses the definition", () => {
+    const reg = new Registry()
+      .addDependency(new MemoryFile("zcl_dep.clas.abap", clas("zcl_dep", "    WRITE iv.\n    rv = |{ iv }|.")))
+      .addFile(new MemoryFile("zcl_prj.clas.abap", clas("zcl_prj", "    WRITE iv.\n    rv = zcl_dep=>run( iv ).")))
+      .parse();
+    const dep = reg.getObject("CLAS", "ZCL_DEP") as Class;
+    const prj = reg.getObject("CLAS", "ZCL_PRJ") as Class;
+    expect(writes(dep)).to.equal(0);
+    expect(writes(prj)).to.equal(1);
+    expect(dep.getDefinition()?.getMethodDefinitions().getByName("run")?.getParameters().getAll().length).to.equal(2);
+    expect(new SyntaxLogic(reg, prj).run().issues).to.deep.equal([]);
+  });
+
+  it("are parsed when the editor asks for the file, and stay parsed", () => {
+    const uri = "file:///deps/zcl_dep.clas.abap";
+    const reg = new Registry()
+      .addDependency(new MemoryFile(uri, clas("zcl_dep", "    DATA lv_count TYPE i.\n    WRITE lv_count.")))
+      .parse();
+    const dep = reg.getObject("CLAS", "ZCL_DEP") as Class;
+    const hover = new LanguageServer(reg).hover({textDocument: {uri}, position: {line: 7, character: 11}});
+    expect(JSON.stringify(hover)).to.include("lv_count");
+    expect(writes(dep)).to.equal(1);
+    expect(dep.getDefinition()).to.not.equal(undefined);
+    expect(LSPUtils.getABAPFile(reg, uri)).to.equal(LSPUtils.getABAPFile(reg, uri));
+    dep.setDirty();
+    reg.parse();
+    expect(writes(dep)).to.equal(1);
+  });
+
+  it("are parsed with the options of the parse that skipped them", () => {
+    const reg = new Registry().addDependency(new MemoryFile("zcl_dep.clas.abap", clas("zcl_dep", "    zmacro.")));
+    const dep = reg.getObject("CLAS", "ZCL_DEP") as Class;
+    dep.parse(defaultRelease, ["zmacro"], reg);
+    dep.parseMethodBodies();
+    const macroCalls = dep.getABAPFiles().flatMap(f => f.getStatements()).filter(s => s.get() instanceof MacroCall);
+    expect(macroCalls.length).to.equal(1);
+  });
+
+  it("of other dependency objects are parsed, a project program can INCLUDE them", () => {
+    const reg = new Registry()
+      .addDependency(new MemoryFile("zdep_inc.prog.abap", `CLASS lcl DEFINITION.
+  PUBLIC SECTION.
+    METHODS run.
+ENDCLASS.
+CLASS lcl IMPLEMENTATION.
+  METHOD run.
+    WRITE 1.
+  ENDMETHOD.
+ENDCLASS.`))
+      .addDependency(new MemoryFile("zdep_inc.prog.xml", "<SUBC>I</SUBC>"))
+      .parse();
+    expect(writes(reg.getObject("PROG", "ZDEP_INC") as ABAPObject)).to.equal(1);
+  });
+
+  it("with a program INCLUDE are parsed, the include is used", () => {
+    const reg = new Registry()
+      .addDependency(new MemoryFile("zcl_dep.clas.abap", clas("zcl_dep", "    INCLUDE zinc.")))
+      .addFile(new MemoryFile("zinc.prog.abap", "WRITE 1."))
+      .addFile(new MemoryFile("zinc.prog.xml", "<SUBC>I</SUBC>"))
+      .parse();
+    expect(new CheckInclude().initialize(reg).run(reg.getObject("PROG", "ZINC")!)).to.deep.equal([]);
+  });
 });

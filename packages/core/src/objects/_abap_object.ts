@@ -1,6 +1,6 @@
 import {AbstractObject} from "./_abstract_object";
 import {xmlToArray, unescape} from "../xml_utils";
-import {ABAPParser} from "../abap/abap_parser";
+import {ABAPParser, IABAPParserOptions} from "../abap/abap_parser";
 import {ABAPRelease, LanguageVersion} from "../version";
 import {ISyntaxResult} from "../abap/5_syntax/_spaghetti_scope";
 import {IParseResult} from "./_iobject";
@@ -16,6 +16,9 @@ export abstract class ABAPObject extends AbstractObject {
   private textsTranslations: ITranslationTextElements[] | undefined;
   private rawXMLCache: any | undefined;
   private parsing = false;
+  /** the options of the parse that skipped the method bodies, undefined if none were skipped */
+  private skippedWith: IABAPParserOptions | undefined = undefined;
+  private methodBodiesWanted = false;
   public syntaxResult: ISyntaxResult | undefined; // do not use this outside of SyntaxLogic class, todo: refactor
 
   public [Symbol.for("debug.description")](){
@@ -42,20 +45,41 @@ export abstract class ABAPObject extends AbstractObject {
       return {updated: false, runtime: 0};
     }
 
+    // nothing outside a dependency class reads its method implementations: syntax and rules of the
+    // project use the definitions, and the files of a class pool cannot be INCLUDEd elsewhere;
+    // an editor showing the file asks for the bodies, see parseMethodBodies()
+    const skipMethodBodies = this.getType() === "CLAS" && this.methodBodiesWanted === false && reg?.isDependency(this) === true;
+    const result = this.runParser({release, globalMacros, reg, languageVersion, skipMethodBodies});
+    this.dirty = false;
+
+    return {updated: true, runtime: result.runtime, runtimeExtra: result.runtimeExtra};
+  }
+
+  /** parses the method bodies if they were skipped, and keeps them in later parses; for the editor, which
+   * shows the file and answers hover, definition and highlighting inside them. The files did not change and
+   * the statements outside the bodies are the same, so definitions built from them stay */
+  public parseMethodBodies(): void {
+    this.methodBodiesWanted = true;
+    if (this.skippedWith === undefined) {
+      return;
+    }
+    this.syntaxResult = undefined;
+    this.runParser({...this.skippedWith, skipMethodBodies: false});
+  }
+
+  private runParser(options: IABAPParserOptions) {
     const abapFiles = this.getFiles().filter(f => f.getFilename().endsWith(".abap"));
     let result;
     this.parsing = true;
     try {
-      result = new ABAPParser({release, globalMacros, reg, languageVersion}).parse(abapFiles);
+      result = new ABAPParser(options).parse(abapFiles);
     } finally {
       this.parsing = false;
     }
-
     this.parsed = result.output;
     this.old = result.issues;
-    this.dirty = false;
-
-    return {updated: true, runtime: result.runtime, runtimeExtra: result.runtimeExtra};
+    this.skippedWith = options.skipMethodBodies === true ? options : undefined;
+    return result;
   }
 
   public setDirty(): void {
